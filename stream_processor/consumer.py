@@ -1,5 +1,5 @@
-from redis_stream import read_logs
-from aggregator import increment_error
+from .redis_stream import read_logs
+from .aggregator import increment_error
 from pymongo import MongoClient
 from dotenv import load_dotenv
 import os
