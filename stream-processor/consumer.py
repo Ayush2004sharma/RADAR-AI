@@ -1,0 +1,31 @@
+from redis_stream import read_logs
+from aggregator import increment_error
+from pymongo import MongoClient
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
+
+mongo = MongoClient(os.getenv("MONGO_URI"))
+db = mongo[os.getenv("MONGO_DB")]
+logs_collection = db[os.getenv("MONGO_COLLECTION")]
+
+last_id = "0-0"
+
+print("Consumer started...")
+
+while True:
+    streams = read_logs(last_id)
+
+    for stream, messages in streams:
+        for msg_id, log in messages:
+            print("Consumed:", log)
+
+            # Store log in MongoDB
+            logs_collection.insert_one(log)
+
+            # Aggregate errors
+            if log.get("level") == "ERROR":
+                increment_error(log.get("service"))
+
+            last_id = msg_id
