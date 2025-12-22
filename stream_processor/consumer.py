@@ -23,13 +23,14 @@ def start_consumer():
             for msg_id, log in messages:
                 print("Consumed:", log)
 
-                # Store log in MongoDB
                 logs_collection.insert_one(log)
 
-                # Aggregate errors
                 if log.get("level") == "ERROR":
                     increment_error(log.get("service"))
 
                 last_id = msg_id
 
-        time.sleep(0.1)  # 🔥 prevents CPU overuse
+        time.sleep(0.1)
+
+if __name__ == "__main__":
+    start_consumer()
