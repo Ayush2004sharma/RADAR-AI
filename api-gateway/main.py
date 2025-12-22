@@ -11,6 +11,8 @@ from ai_agent.llm import suggest_related_files
 from ai_agent.retriever import retrieve_logs  # moved import to top
 from ai_agent.llm import suggest_fix_for_file  # new function you will add
 from fastapi.middleware.cors import CORSMiddleware
+from threading import Thread
+from stream_processor.consumer import run_consumer
 
 
 
@@ -18,6 +20,10 @@ load_dotenv()
 
 
 app = FastAPI(title="RADAR-AI API Gateway")
+@app.on_event("startup")
+def start_consumer():
+    t = Thread(target=run_consumer, daemon=True)
+    t.start()
 
 
 redis = Redis(
@@ -151,6 +157,7 @@ def get_file_content(payload: dict = Body(...)):
 
 @app.post("/diagnose/file/fix")
 def diagnose_and_fix_file(payload: dict = Body(...)):
+    
     """
     After the user selects a file that looks related,
     send logs + current file content to LLM and get a suggested fixed version.
