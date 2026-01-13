@@ -13,7 +13,7 @@ from .auth_guard import get_current_user
 from .projects import router as project_router
 from .logs import router as logs_router
 from .incidents import router as incidents_router
-from .websocket import router as websocket_router
+
 from .incident_resolver import run_resolver
 
 app = FastAPI(title="RADAR-AI API Gateway")
@@ -27,7 +27,7 @@ app.include_router(logs_router)
 # PROTECTED
 app.include_router(project_router, dependencies=[Depends(get_current_user)])
 app.include_router(incidents_router, dependencies=[Depends(get_current_user)])
-app.include_router(websocket_router, dependencies=[Depends(get_current_user)])
+
 
 @app.get("/health")
 def health():
