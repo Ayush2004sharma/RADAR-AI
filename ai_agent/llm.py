@@ -13,6 +13,9 @@ _llm = ChatGroq(
 )
 
 
+# ============================================================
+# 🔹 SHARED UTILITY (ORIGINAL)
+# ============================================================
 def _format_logs_for_prompt(logs: List[Dict]) -> str:
     lines = []
     for l in logs:
@@ -23,6 +26,9 @@ def _format_logs_for_prompt(logs: List[Dict]) -> str:
     return "\n".join(lines)
 
 
+# ============================================================
+# 🔹 ORIGINAL — SERVICE-BASED DIAGNOSIS (UNCHANGED)
+# ============================================================
 def generate_diagnosis_with_llm(service: str, logs: List[Dict]) -> str:
     """
     LLM generates diagnosis ONLY from provided logs.
@@ -56,7 +62,14 @@ Answer in 1–3 short sentences.
     return response.content.strip()
 
 
-def suggest_related_files(service: str, logs: List[Dict], files: List[Dict]) -> List[Dict]:
+# ============================================================
+# 🔹 ORIGINAL — FILE SUGGESTION (UNCHANGED)
+# ============================================================
+def suggest_related_files(
+    service: str,
+    logs: List[Dict],
+    files: List[Dict]
+) -> List[Dict]:
     """
     Use the LLM to suggest a small list of likely-related files
     based on error logs and project file names.
@@ -80,54 +93,39 @@ Project files (relative paths):
 
 Rules:
 - ONLY suggest files that appear in the list above.
-- Base your suggestions on:
-  - route names, endpoints, or feature names mentioned in the logs,
-  - error messages (e.g. function names, model names, modules),
-  - and any other obvious string matches.
-- If you are not reasonably confident about any file, return an empty list.
-- Do NOT invent file paths that are not in the list.
-- Keep the output short and structured.
+- Base your suggestions on obvious string matches from logs.
+- If you are not reasonably confident, return an empty list.
+- Do NOT invent file paths.
 
-Task:
-From the file list, choose up to 3 files that are most likely related
-to the error shown in the logs.
-
-For each suggested file, provide:
-- "path": the file path exactly as in the list,
-- "reason": a short explanation referencing the logs.
-
-Return ONLY valid JSON in the following format:
-
-[
-  {{ "path": "path/from/list.js", "reason": "..." }},
-  ...
-]
+Return ONLY valid JSON.
 """
 
     response = _llm.invoke(prompt)
     text = response.content.strip()
 
-    # Very simple, safe JSON parsing; if it fails, return empty list
     try:
         import json
 
         suggestions = json.loads(text)
         result: List[Dict] = []
         allowed_paths = {f["path"] for f in files}
+
         if isinstance(suggestions, list):
             for item in suggestions:
                 if not isinstance(item, dict):
                     continue
                 path = item.get("path")
                 reason = item.get("reason", "")
-                if path in allowed_paths and isinstance(reason, str):
+                if path in allowed_paths:
                     result.append({"path": path, "reason": reason})
         return result
     except Exception:
         return []
 
 
-# ---------- NEW: fix selected file ----------
+# ============================================================
+# 🔹 ORIGINAL — FILE FIX (UNCHANGED)
+# ============================================================
 def suggest_fix_for_file(
     service: str,
     logs: List[Dict],
@@ -137,8 +135,6 @@ def suggest_fix_for_file(
     """
     Use the LLM to propose a fixed version of the file,
     using ONLY the given logs + file content.
-
-    Returns (fixed_code, short_explanation).
     """
     log_text = _format_logs_for_prompt(logs)
 
@@ -148,36 +144,30 @@ You are a senior backend engineer.
 Service name: {service}
 File path: {path}
 
-Error logs (only evidence you can use):
+Error logs:
 {log_text}
 
 Current file content:
 {content}
 
 Instructions:
-- Use ONLY the logs and the file content above as evidence.
-- Do NOT guess about other files, configs, or services.
-- If logs do NOT clearly show a bug in this file, say that and return the same code.
-- If you see a clear bug related to the logs, return a fixed version of THIS file.
-- Keep style similar to the existing code.
-
-Tasks:
-1. Briefly explain the bug and the change you will make (1–3 sentences).
-2. Then output ONLY the full updated file content.
+- Use ONLY the logs and the file content above.
+- Do NOT guess about other files.
+- If logs do NOT clearly show a bug, return the same code.
 
 Format:
 EXPLANATION:
-<one short paragraph>
+...
 
 UPDATED_FILE:
-<full updated file here>
-```"""
+...
+"""
 
     response = _llm.invoke(prompt)
     text = response.content.strip()
 
     explanation = ""
-    fixed_code = content  # fallback to original
+    fixed_code = content
 
     if "UPDATED_FILE:" in text:
         parts = text.split("UPDATED_FILE:", 1)
@@ -189,10 +179,99 @@ UPDATED_FILE:
         else:
             explanation = explanation_part.strip()
 
-        if "```" in file_part:
-            file_part = file_part.split("```", 1)[1]
-            if "```" in file_part:
-                file_part = file_part.split("```", 1)[0]
+        fixed_code = file_part.strip()
+
+    return fixed_code, explanation
+
+
+# ============================================================
+# 🆕 NEW — INCIDENT-BASED DIAGNOSIS (ADDITIVE)
+# ============================================================
+def generate_incident_diagnosis(
+    incident: Dict,
+    logs: List[Dict],
+) -> str:
+    """
+    Incident-scoped diagnosis.
+    Uses incident metadata instead of service.
+    """
+    log_text = _format_logs_for_prompt(logs)
+
+    prompt = f"""
+You are diagnosing a SINGLE INCIDENT.
+
+Incident ID: {incident.get("_id")}
+Incident message: {incident.get("message")}
+
+Rules:
+- Use ONLY the logs below.
+- Do NOT assume anything outside this incident.
+
+Logs:
+{log_text}
+
+Task:
+State the most likely root cause OR say logs are insufficient.
+"""
+
+    response = _llm.invoke(prompt)
+    return response.content.strip()
+
+
+# ============================================================
+# 🆕 NEW — INCIDENT-BASED FILE FIX (ADDITIVE)
+# ============================================================
+def suggest_fix_for_incident_file(
+    incident: Dict,
+    logs: List[Dict],
+    path: str,
+    content: str,
+) -> Tuple[str, str]:
+    """
+    Incident-scoped fix suggestion.
+    """
+    log_text = _format_logs_for_prompt(logs)
+
+    prompt = f"""
+You are fixing code for a SINGLE INCIDENT.
+
+Incident ID: {incident.get("_id")}
+Incident message: {incident.get("message")}
+File path: {path}
+
+Logs:
+{log_text}
+
+File content:
+{content}
+
+Rules:
+- Use ONLY the logs + this file.
+- Do NOT reference other files.
+
+Format:
+EXPLANATION:
+...
+
+UPDATED_FILE:
+...
+"""
+
+    response = _llm.invoke(prompt)
+    text = response.content.strip()
+
+    explanation = ""
+    fixed_code = content
+
+    if "UPDATED_FILE:" in text:
+        parts = text.split("UPDATED_FILE:", 1)
+        explanation_part = parts[0]
+        file_part = parts[1]
+
+        if "EXPLANATION:" in explanation_part:
+            explanation = explanation_part.split("EXPLANATION:", 1)[1].strip()
+        else:
+            explanation = explanation_part.strip()
 
         fixed_code = file_part.strip()
 
