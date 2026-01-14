@@ -3,6 +3,12 @@ import requests
 from typing import List, Dict, Optional
 from dotenv import load_dotenv
 
+from api_gateway.agent_state import (
+    FILE_STRUCTURE_CACHE,
+    FILE_REQUEST_CACHE,
+    FILE_CONTENT_CACHE,
+)
+
 load_dotenv()
 
 # ============================================================
@@ -102,105 +108,40 @@ def list_project_files(
     max_files: int = 200,
     project: Optional[dict] = None,
 ) -> List[Dict]:
-    """
-    Returns:
-    [
-      {"path": "server.js", "size": 1329},
-      ...
-    ]
-    """
+    if not project:
+        return []
 
-    # 🌐 PRODUCTION: CALL USER FILE AGENT
-    if _use_file_agent(project):
-        try:
-            res = requests.get(
-                f"{project['file_agent_url']}/files",
-                headers=_agent_headers(project),
-                timeout=5,
-            )
-            res.raise_for_status()
+    project_id = str(project["_id"])
 
-            files = res.json().get("files", [])
-            return files[:max_files]
+    entry = FILE_STRUCTURE_CACHE.get(project_id)
+    if not entry:
+        return []
 
-        except Exception as e:
-            print("⚠️ File agent error:", e)
-            return []
-
-    # 🖥️ LOCAL FALLBACK (DEV ONLY)
-    files: List[Dict] = []
-
-    if not os.path.isdir(PROJECT_ROOT):
-        return files
-
-    for dirpath, dirnames, filenames in os.walk(PROJECT_ROOT):
-        dirnames[:] = [d for d in dirnames if d not in DENY_DIR_NAMES]
-
-        for filename in filenames:
-            abs_path = os.path.join(dirpath, filename)
-
-            if not _is_path_under_root(abs_path):
-                continue
-            if not _is_allowed_file(abs_path):
-                continue
-
-            rel_path = os.path.relpath(abs_path, PROJECT_ROOT)
-            try:
-                size = os.path.getsize(abs_path)
-            except OSError:
-                size = 0
-
-            files.append({
-                "path": rel_path.replace("\\", "/"),
-                "size": int(size),
-            })
-
-            if len(files) >= max_files:
-                return files
-
-    return files
-
-
+    files = entry.get("files", [])
+    return files[:max_files]
 # ============================================================
 # 📄 READ PROJECT FILE CONTENT
 # ============================================================
-
 def read_project_file(
     relative_path: str,
     project: Optional[dict] = None,
 ) -> Optional[str]:
 
-    if not relative_path:
+    if not project or not relative_path:
         return None
 
-    # 🌐 PRODUCTION: CALL USER FILE AGENT
-    if _use_file_agent(project):
-        try:
-            res = requests.post(
-                f"{project['file_agent_url']}/file",
-                headers=_agent_headers(project),
-                json={"path": relative_path},
-                timeout=5,
-            )
-            res.raise_for_status()
-            return res.json().get("content")
-        except Exception as e:
-            print("⚠️ File read error:", e)
-            return None
+    project_id = str(project["_id"])
 
-    # 🖥️ LOCAL FALLBACK (DEV ONLY)
-    rel = relative_path.lstrip("/").replace("\\", "/")
-    abs_path = os.path.realpath(os.path.join(PROJECT_ROOT, rel))
+    # 1️⃣ REQUEST FILE FROM WATCHER
+    FILE_REQUEST_CACHE[project_id] = {
+        "path": relative_path,
+        "status": "WAITING",
+    }
 
-    if not _is_path_under_root(abs_path):
-        return None
-    if not os.path.isfile(abs_path):
-        return None
-    if not _is_allowed_file(abs_path):
-        return None
+    # 2️⃣ WAIT FOR WATCHER RESPONSE (POLL MEMORY)
+    for _ in range(30):  # ~3 seconds
+        entry = FILE_CONTENT_CACHE.get(project_id)
+        if entry and entry.get("path") == relative_path:
+            return entry.get("content")
 
-    try:
-        with open(abs_path, "r", encoding="utf-8") as f:
-            return f.read()
-    except (OSError, UnicodeDecodeError):
-        return None
+    return None

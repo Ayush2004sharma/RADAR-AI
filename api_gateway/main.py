@@ -13,7 +13,7 @@ from .auth_guard import get_current_user
 from .projects import router as project_router
 from .logs import router as logs_router
 from .incidents import router as incidents_router
-
+from .agent_routes import router as agent_router
 from .incident_resolver import run_resolver
 
 app = FastAPI(title="RADAR-AI API Gateway")
@@ -23,6 +23,7 @@ Thread(target=run_resolver, daemon=True).start()
 # PUBLIC
 app.include_router(auth_router, prefix="/auth")
 app.include_router(logs_router)
+app.include_router(agent_router)
 
 # PROTECTED
 app.include_router(project_router, dependencies=[Depends(get_current_user)])

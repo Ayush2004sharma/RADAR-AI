@@ -1,47 +1,45 @@
 from fastapi import APIRouter, Body, Depends, HTTPException
 from bson import ObjectId
 from bson.errors import InvalidId
+
 from ai_agent.incident_selector import prioritize_incidents
+from ai_agent.file_priority import (
+    rank_files,
+    rank_files_for_incident,
+)
+from ai_agent.filesystem import (
+    list_project_files,
+    read_project_file,
+)
+from ai_agent.retriever import (
+    retrieve_logs,
+    retrieve_incident_logs,
+)
+from ai_agent.llm import (
+    suggest_fix_for_file,
+    suggest_fix_for_incident_file,
+    generate_incident_diagnosis,
+)
 
 from .db import db
 from .auth_guard import get_current_user
 
-# 🔹 ORIGINAL imports (unchanged)
-from ai_agent.file_priority import (
-    rank_files,                  # legacy
-    rank_files_for_incident,      # NEW
-)
-from ai_agent.filesystem import list_project_files, read_project_file
-from ai_agent.retriever import (
-    retrieve_logs,               # legacy
-    retrieve_incident_logs,       # NEW
-)
-from ai_agent.llm import (
-    suggest_fix_for_file,        # legacy
-    suggest_fix_for_incident_file,  # NEW
-    generate_diagnosis_with_llm, # legacy
-    generate_incident_diagnosis, # NEW
-)
-
 router = APIRouter()
 
+# ============================================================
+# 🔹 SHARED UTILS
+# ============================================================
 
-# ============================================================
-# 🔹 SHARED UTILS (ORIGINAL STYLE)
-# ============================================================
 def parse_object_id(value: str, name: str) -> ObjectId:
     try:
         return ObjectId(value)
     except (InvalidId, TypeError):
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid {name} format"
-        )
-
+        raise HTTPException(400, f"Invalid {name} format")
 
 # ============================================================
-# 🔹 LIST ACTIVE INCIDENTS (UNCHANGED)
+# 🔹 LIST ACTIVE INCIDENTS
 # ============================================================
+
 @router.get("/incidents")
 def list_incidents(project_id: str, user=Depends(get_current_user)):
     project = db.projects.find_one({
@@ -55,24 +53,21 @@ def list_incidents(project_id: str, user=Depends(get_current_user)):
         {"project_id": project["_id"], "status": "ACTIVE"}
     ).sort("last_seen", -1)
 
-    return [
-        {
-            "id": str(i["_id"]),
-            "service": i.get("service"),
-            "message": i.get("message"),
-            "file": i.get("file"),
-            "line": i.get("line"),
-            "count": i.get("count", 0),
-            "last_seen": i.get("last_seen"),
-            "status": i.get("status", "ACTIVE"),
-        }
-        for i in incidents
-    ]
-
+    return [{
+        "id": str(i["_id"]),
+        "service": i.get("service"),
+        "message": i.get("message"),
+        "file": i.get("file"),
+        "line": i.get("line"),
+        "count": i.get("count", 0),
+        "last_seen": i.get("last_seen"),
+        "status": i.get("status", "ACTIVE"),
+    } for i in incidents]
 
 # ============================================================
-# 🆕 INCIDENT DIAGNOSIS (ADDITIVE)
+# 🆕 INCIDENT DIAGNOSIS
 # ============================================================
+
 @router.post("/incidents/diagnose")
 def diagnose_incident(payload: dict = Body(...), user=Depends(get_current_user)):
     incident_id = parse_object_id(payload.get("incident_id"), "incident_id")
@@ -89,9 +84,7 @@ def diagnose_incident(payload: dict = Body(...), user=Depends(get_current_user))
     if not project:
         raise HTTPException(403, "Forbidden")
 
-    # 🔒 INCIDENT-SCOPED LOGS
     logs = retrieve_incident_logs(str(project_id), incident_id)
-
     diagnosis = generate_incident_diagnosis(incident, logs)
 
     return {
@@ -100,10 +93,10 @@ def diagnose_incident(payload: dict = Body(...), user=Depends(get_current_user))
         "log_count": len(logs),
     }
 
+# ============================================================
+# 🔹 PRIORITIZED FILES (✅ FIXED)
+# ============================================================
 
-# ============================================================
-# 🔹 PRIORITIZED FILES (LEGACY + INCIDENT SAFE)
-# ============================================================
 @router.post("/incidents/files/priority")
 def get_prioritized_files(payload: dict = Body(...), user=Depends(get_current_user)):
     incident_id = parse_object_id(payload.get("incident_id"), "incident_id")
@@ -120,9 +113,12 @@ def get_prioritized_files(payload: dict = Body(...), user=Depends(get_current_us
     if not project:
         raise HTTPException(403, "Forbidden")
 
-    files = list_project_files(max_files=300)
+    # ✅ IMPORTANT FIX (agent structure)
+    files = list_project_files(
+        max_files=300,
+        project=project
+    )
 
-    # 🔹 Prefer INCIDENT logs if present
     logs = retrieve_incident_logs(str(project_id), incident_id)
 
     if logs:
@@ -133,15 +129,14 @@ def get_prioritized_files(payload: dict = Body(...), user=Depends(get_current_us
             max_files=5,
         )
     else:
-        # 🔁 fallback (legacy, no behavior loss)
-        logs = retrieve_logs(
+        legacy_logs = retrieve_logs(
             project_id=str(project["_id"]),
             project_secret=project["project_secret"],
             service=incident.get("service"),
         )
         ranked = rank_files(
             files=files,
-            logs=logs,
+            logs=legacy_logs,
             service=incident.get("service"),
             max_files=5,
         )
@@ -151,10 +146,10 @@ def get_prioritized_files(payload: dict = Body(...), user=Depends(get_current_us
         "files": ranked,
     }
 
+# ============================================================
+# 🔹 FIX FILE FOR INCIDENT (✅ FIXED)
+# ============================================================
 
-# ============================================================
-# 🔹 FIX FILE FOR INCIDENT (LEGACY + INCIDENT SAFE)
-# ============================================================
 @router.post("/incidents/file/fix")
 def fix_file_for_incident(payload: dict = Body(...), user=Depends(get_current_user)):
     incident_id = parse_object_id(payload.get("incident_id"), "incident_id")
@@ -178,10 +173,13 @@ def fix_file_for_incident(payload: dict = Body(...), user=Depends(get_current_us
     if not project:
         raise HTTPException(403, "Forbidden")
 
-    # 🔒 Prefer incident logs
     logs = retrieve_incident_logs(str(project_id), incident_id)
 
-    content = read_project_file(path)
+    # ✅ IMPORTANT FIX (agent file request)
+    content = read_project_file(
+        path,
+        project=project
+    )
     if content is None:
         raise HTTPException(400, "File not accessible")
 
@@ -193,7 +191,6 @@ def fix_file_for_incident(payload: dict = Body(...), user=Depends(get_current_us
             content=content,
         )
     else:
-        # 🔁 fallback legacy behavior
         legacy_logs = retrieve_logs(
             project_id=str(project["_id"]),
             project_secret=project["project_secret"],
@@ -214,10 +211,10 @@ def fix_file_for_incident(payload: dict = Body(...), user=Depends(get_current_us
         "explanation": explanation,
     }
 
+# ============================================================
+# 🔹 RESOLVE INCIDENT
+# ============================================================
 
-# ============================================================
-# 🔹 RESOLVE / RETRY INCIDENT (UNCHANGED)
-# ============================================================
 @router.post("/incidents/resolve")
 def resolve_incident(payload: dict = Body(...), user=Depends(get_current_user)):
     incident_id = parse_object_id(payload.get("incident_id"), "incident_id")
@@ -248,20 +245,17 @@ def resolve_incident(payload: dict = Body(...), user=Depends(get_current_user)):
     else:
         db.incidents.update_one(
             {"_id": incident["_id"]},
-            {"$addToSet": {
-                "attempted_files": file_path,
-            }},
+            {"$addToSet": {"attempted_files": file_path}},
         )
 
     return {"status": "ok"}
 
+# ============================================================
+# 🆕 INCIDENT PRIORITY
+# ============================================================
 
-# ============================================================
-# 🆕 INCIDENT PRIORITY API (READ-ONLY, SAFE)
-# ============================================================
 @router.get("/incidents/priority")
 def get_prioritized_incidents(project_id: str, user=Depends(get_current_user)):
-    # 🔐 Project access check
     project = db.projects.find_one({
         "_id": ObjectId(project_id),
         "user_id": user["_id"]
@@ -269,28 +263,20 @@ def get_prioritized_incidents(project_id: str, user=Depends(get_current_user)):
     if not project:
         raise HTTPException(403, "Forbidden")
 
-    # 🔹 Fetch ACTIVE incidents ONLY
     incidents = list(db.incidents.find({
         "project_id": project["_id"],
         "status": "ACTIVE"
     }))
 
-    # 🔹 Normalize for agent input
-    incident_payload = [
-        {
-            "id": str(i["_id"]),
-            "service": i.get("service"),
-            "message": i.get("message"),
-            "file": i.get("file"),
-            "line": i.get("line"),
-            "count": i.get("count", 0),
-            "last_seen": i.get("last_seen"),
-            "status": i.get("status", "ACTIVE"),
-        }
-        for i in incidents
-    ]
+    payload = [{
+        "id": str(i["_id"]),
+        "service": i.get("service"),
+        "message": i.get("message"),
+        "file": i.get("file"),
+        "line": i.get("line"),
+        "count": i.get("count", 0),
+        "last_seen": i.get("last_seen"),
+        "status": i.get("status", "ACTIVE"),
+    } for i in incidents]
 
-    # 🧠 PRIORITY DECISION (AGENT)
-    priority_result = prioritize_incidents(incident_payload)
-
-    return priority_result
+    return prioritize_incidents(payload)
