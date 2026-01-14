@@ -1,16 +1,16 @@
 import os
+import requests
 from typing import List, Dict, Optional
 from dotenv import load_dotenv
 
-
 load_dotenv()
 
-# Absolute root of the project RADAR-AI is allowed to read.
-# Example in .env:
-# PROJECT_ROOT=/home/user/projects/ecommerce
+# ============================================================
+# 🔒 LOCAL FILESYSTEM CONFIG (DEV / FALLBACK MODE)
+# ============================================================
+
 PROJECT_ROOT = os.path.realpath(os.getenv("PROJECT_ROOT", "").strip() or ".")
 
-# Directories that should never be traversed (even if under PROJECT_ROOT)
 DENY_DIR_NAMES = {
     ".git",
     ".idea",
@@ -21,7 +21,6 @@ DENY_DIR_NAMES = {
     ".venv",
 }
 
-# File basenames that are always forbidden
 DENY_FILE_NAMES = {
     ".env",
     ".env.local",
@@ -31,7 +30,6 @@ DENY_FILE_NAMES = {
     "id_rsa.pub",
 }
 
-# File extensions that are considered sensitive and never read
 DENY_FILE_EXTENSIONS = {
     ".pem",
     ".key",
@@ -40,7 +38,6 @@ DENY_FILE_EXTENSIONS = {
     ".pfx",
 }
 
-# File extensions that are allowed for reading (code/text)
 ALLOW_FILE_EXTENSIONS = {
     ".py",
     ".js",
@@ -55,22 +52,17 @@ ALLOW_FILE_EXTENSIONS = {
     ".md",
 }
 
+# ============================================================
+# 🔒 INTERNAL HELPERS (LOCAL MODE)
+# ============================================================
 
 def _is_path_under_root(abs_path: str) -> bool:
-    """
-    Ensure abs_path is inside PROJECT_ROOT (prevents ../ traversal).
-    """
-    root = PROJECT_ROOT
-    # Normalize both paths
-    root = os.path.realpath(root)
+    root = os.path.realpath(PROJECT_ROOT)
     abs_path = os.path.realpath(abs_path)
     return os.path.commonpath([root, abs_path]) == root
 
 
 def _is_sensitive_file(abs_path: str) -> bool:
-    """
-    Check if a file is considered sensitive and must never be read.
-    """
     name = os.path.basename(abs_path)
     _, ext = os.path.splitext(name)
 
@@ -84,9 +76,6 @@ def _is_sensitive_file(abs_path: str) -> bool:
 
 
 def _is_allowed_file(abs_path: str) -> bool:
-    """
-    Check if a file extension is within the allowed text/code types.
-    """
     if _is_sensitive_file(abs_path):
         return False
 
@@ -94,24 +83,64 @@ def _is_allowed_file(abs_path: str) -> bool:
     return ext.lower() in ALLOW_FILE_EXTENSIONS
 
 
-def list_project_files(max_files: int = 200) -> List[Dict]:
-    """
-    List up to max_files project files under PROJECT_ROOT
-    that are safe to show as options to the user.
+# ============================================================
+# 🌐 REMOTE FILE AGENT HELPERS (PRODUCTION MODE)
+# ============================================================
 
-    Returns a list of dicts:
+def _use_file_agent(project: Optional[dict]) -> bool:
+    return bool(project and project.get("file_agent_url"))
+
+
+def _agent_headers(project: dict) -> Dict:
+    """
+    Optional: protect file-agent with project_secret
+    """
+    return {
+        "X-Project-Secret": project.get("project_secret", "")
+    }
+
+
+# ============================================================
+# 📂 LIST PROJECT FILES
+# ============================================================
+
+def list_project_files(
+    max_files: int = 200,
+    project: Optional[dict] = None,
+) -> List[Dict]:
+    """
+    Returns:
     [
-        {"path": "src/auth/routes.py", "size": 1234},
-        ...
+      {"path": "src/app.js", "size": 1234},
+      ...
     ]
     """
+
+    # 🌐 PRODUCTION: USER FILE AGENT
+    if _use_file_agent(project):
+        try:
+            res = requests.get(
+                f"{project['file_agent_url']}/files",
+                headers=_agent_headers(project),
+                timeout=5,
+            )
+            res.raise_for_status()
+
+            files = res.json().get("files", [])
+            return [
+                {"path": f.replace("\\", "/"), "size": 0}
+                for f in files[:max_files]
+            ]
+        except Exception:
+            return []
+
+    # 🖥️ LOCAL: DIRECT FILESYSTEM ACCESS
     files: List[Dict] = []
 
     if not os.path.isdir(PROJECT_ROOT):
         return files
 
     for dirpath, dirnames, filenames in os.walk(PROJECT_ROOT):
-        # Filter out denied directories in-place
         dirnames[:] = [d for d in dirnames if d not in DENY_DIR_NAMES]
 
         for filename in filenames:
@@ -129,12 +158,10 @@ def list_project_files(max_files: int = 200) -> List[Dict]:
             except OSError:
                 size = 0
 
-            files.append(
-                {
-                    "path": rel_path.replace("\\", "/"),
-                    "size": int(size),
-                }
-            )
+            files.append({
+                "path": rel_path.replace("\\", "/"),
+                "size": int(size),
+            })
 
             if len(files) >= max_files:
                 return files
@@ -142,27 +169,39 @@ def list_project_files(max_files: int = 200) -> List[Dict]:
     return files
 
 
-def read_project_file(relative_path: str) -> Optional[str]:
-    """
-    Safely read a file under PROJECT_ROOT.
+# ============================================================
+# 📄 READ PROJECT FILE CONTENT
+# ============================================================
 
-    - Only reads files inside PROJECT_ROOT.
-    - Rejects sensitive names/extensions.
-    - Only allows text/code files as per ALLOW_FILE_EXTENSIONS.
-    - Returns file content as UTF-8 text, or None if not allowed / missing.
-    """
+def read_project_file(
+    relative_path: str,
+    project: Optional[dict] = None,
+) -> Optional[str]:
+
     if not relative_path:
         return None
 
-    # Normalize and build absolute path
+    # 🌐 PRODUCTION: USER FILE AGENT
+    if _use_file_agent(project):
+        try:
+            res = requests.post(
+                f"{project['file_agent_url']}/file",
+                headers=_agent_headers(project),
+                json={"path": relative_path},
+                timeout=5,
+            )
+            res.raise_for_status()
+            return res.json().get("content")
+        except Exception:
+            return None
+
+    # 🖥️ LOCAL: DIRECT FILESYSTEM ACCESS
     rel = relative_path.lstrip("/").replace("\\", "/")
     abs_path = os.path.realpath(os.path.join(PROJECT_ROOT, rel))
 
-    # Ensure path stays inside PROJECT_ROOT
     if not _is_path_under_root(abs_path):
         return None
 
-    # Ensure this is a regular file and not sensitive
     if not os.path.isfile(abs_path):
         return None
 
@@ -173,5 +212,4 @@ def read_project_file(relative_path: str) -> Optional[str]:
         with open(abs_path, "r", encoding="utf-8") as f:
             return f.read()
     except (OSError, UnicodeDecodeError):
-        # In production, you could log this internally
         return None
