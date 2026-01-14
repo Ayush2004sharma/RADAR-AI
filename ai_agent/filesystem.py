@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ============================================================
-# 🔒 LOCAL FILESYSTEM CONFIG (DEV / FALLBACK MODE)
+# 🔒 LOCAL FILESYSTEM CONFIG (DEV / FALLBACK ONLY)
 # ============================================================
 
 PROJECT_ROOT = os.path.realpath(os.getenv("PROJECT_ROOT", "").strip() or ".")
@@ -66,25 +66,21 @@ def _is_sensitive_file(abs_path: str) -> bool:
     name = os.path.basename(abs_path)
     _, ext = os.path.splitext(name)
 
-    if name in DENY_FILE_NAMES:
-        return True
-
-    if ext.lower() in DENY_FILE_EXTENSIONS:
-        return True
-
-    return False
+    return (
+        name in DENY_FILE_NAMES
+        or ext.lower() in DENY_FILE_EXTENSIONS
+    )
 
 
 def _is_allowed_file(abs_path: str) -> bool:
     if _is_sensitive_file(abs_path):
         return False
-
     _, ext = os.path.splitext(abs_path)
     return ext.lower() in ALLOW_FILE_EXTENSIONS
 
 
 # ============================================================
-# 🌐 REMOTE FILE AGENT HELPERS (PRODUCTION MODE)
+# 🌐 FILE AGENT HELPERS (PRODUCTION MODE)
 # ============================================================
 
 def _use_file_agent(project: Optional[dict]) -> bool:
@@ -92,9 +88,7 @@ def _use_file_agent(project: Optional[dict]) -> bool:
 
 
 def _agent_headers(project: dict) -> Dict:
-    """
-    Optional: protect file-agent with project_secret
-    """
+    # optional protection (future)
     return {
         "X-Project-Secret": project.get("project_secret", "")
     }
@@ -111,12 +105,12 @@ def list_project_files(
     """
     Returns:
     [
-      {"path": "src/app.js", "size": 1234},
+      {"path": "server.js", "size": 1329},
       ...
     ]
     """
 
-    # 🌐 PRODUCTION: USER FILE AGENT
+    # 🌐 PRODUCTION: CALL USER FILE AGENT
     if _use_file_agent(project):
         try:
             res = requests.get(
@@ -127,14 +121,13 @@ def list_project_files(
             res.raise_for_status()
 
             files = res.json().get("files", [])
-            return [
-                {"path": f.replace("\\", "/"), "size": 0}
-                for f in files[:max_files]
-            ]
-        except Exception:
+            return files[:max_files]
+
+        except Exception as e:
+            print("⚠️ File agent error:", e)
             return []
 
-    # 🖥️ LOCAL: DIRECT FILESYSTEM ACCESS
+    # 🖥️ LOCAL FALLBACK (DEV ONLY)
     files: List[Dict] = []
 
     if not os.path.isdir(PROJECT_ROOT):
@@ -148,7 +141,6 @@ def list_project_files(
 
             if not _is_path_under_root(abs_path):
                 continue
-
             if not _is_allowed_file(abs_path):
                 continue
 
@@ -181,7 +173,7 @@ def read_project_file(
     if not relative_path:
         return None
 
-    # 🌐 PRODUCTION: USER FILE AGENT
+    # 🌐 PRODUCTION: CALL USER FILE AGENT
     if _use_file_agent(project):
         try:
             res = requests.post(
@@ -192,19 +184,18 @@ def read_project_file(
             )
             res.raise_for_status()
             return res.json().get("content")
-        except Exception:
+        except Exception as e:
+            print("⚠️ File read error:", e)
             return None
 
-    # 🖥️ LOCAL: DIRECT FILESYSTEM ACCESS
+    # 🖥️ LOCAL FALLBACK (DEV ONLY)
     rel = relative_path.lstrip("/").replace("\\", "/")
     abs_path = os.path.realpath(os.path.join(PROJECT_ROOT, rel))
 
     if not _is_path_under_root(abs_path):
         return None
-
     if not os.path.isfile(abs_path):
         return None
-
     if not _is_allowed_file(abs_path):
         return None
 
