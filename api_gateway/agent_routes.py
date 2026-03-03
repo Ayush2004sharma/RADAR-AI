@@ -82,3 +82,24 @@ def receive_file(payload: dict):
         FILE_REQUEST_CACHE[project_id]["status"] = "RECEIVED"
 
     return {"status": "file_received"}
+
+@router.post("/agent/verify")
+def verify_agent(payload: dict):
+    project_id = payload.get("project_id")
+    project_secret = payload.get("project_secret")
+
+    try:
+        project = db.projects.find_one({
+            "_id": ObjectId(project_id),
+            "project_secret": project_secret
+        })
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid project_id format")
+
+    if not project:
+        raise HTTPException(status_code=403, detail="Invalid project credentials")
+
+    return {
+        "status": "verified",
+        "project_name": project.get("name")
+    }
